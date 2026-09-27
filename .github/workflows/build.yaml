@@ -1,9 +1,14 @@
+# ============================================================================
+# mc-network 打包流水线（正式版）
+# 仅在推送 v* 标签时打包并自动发布 Release；普通分支 push / PR 不触发。
+# 逐行注释与备选参数说明见同目录 build-annotated.yaml（仅供阅读，不会执行）。
+# ============================================================================
 name: Build
 
 on:
   push:
-  pull_request:
-  workflow_dispatch:
+    tags: ['v*']                # 只有推送 v* 标签（如 v0.2.0）才打包；分支 push 不触发
+  workflow_dispatch:            # 保留手动入口（Actions 页 Run workflow；填 version 出 draft Release）
     inputs:
       version:
         description: 'Release 版本号（如 0.2.0）；留空仅构建。发版推荐直接打 v* tag，自动发布 Release'
@@ -11,7 +16,7 @@ on:
         type: string
 
 permissions:
-  contents: write
+  contents: write               # gh release create/upload 需要的写仓库内容权限
 
 env:
   CARGO_TERM_COLOR: always
