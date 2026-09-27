@@ -1,0 +1,168 @@
+name: Build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release 版本号（如 0.2.0）；留空则沿用 tauri.conf.json 的版本'
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: full
+  # 与 src-tauri/build_support/easytier_pack.rs 的 ET_VERSION 保持一致（EasyTier 缓存 key）
+  EASYTIER_VERSION: v2.6.4
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    name: Build (x86_64-pc-windows-msvc)
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Compute Version
+        run: |
+          set -euo pipefail
+          INPUT="${{ github.event.inputs.version }}"
+          if [ -n "$INPUT" ]; then
+            VERSION="$INPUT"
+            jq --arg v "$VERSION" '.version = $v' src-tauri/tauri.conf.json > tmp.json && mv tmp.json src-tauri/tauri.conf.json
+            jq --arg v "$VERSION" '.version = $v' package.json > tmp.json && mv tmp.json package.json
+            sed -i "s/^version = \".*\"/version = \"$VERSION\"/" src-tauri/Cargo.toml
+          else
+            VERSION="$(jq -r '.version' src-tauri/tauri.conf.json)"
+            if [ -z "$VERSION" ] || [ "$VERSION" = "null" ]; then
+              VERSION="${GITHUB_SHA::7}"
+            fi
+          fi
+          echo "MCN_VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "resolved version: $VERSION"
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: yarn
+
+      - name: Install Frontend Dependencies
+        run: yarn install --frozen-lockfile
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+
+      # build.rs 会从 GitHub Releases 下载 EasyTier 官方 zip；缓存命中则幂等跳过下载
+      - name: Cache EasyTier Binaries
+        uses: actions/cache@v4
+        with:
+          path: src-tauri/.easytier
+          key: easytier-${{ env.EASYTIER_VERSION }}-windows-x86_64
+
+      - name: Test
+        working-directory: src-tauri
+        run: cargo test --lib
+
+      - name: Build
+        run: yarn tauri build
+
+      - name: Prepare Artifacts
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          cp "$(ls src-tauri/target/release/bundle/nsis/*-setup.exe | head -n 1)" \
+             "out/mc-network-${MCN_VERSION}-windows-x86_64-setup.exe"
+          cp "$(ls src-tauri/target/release/bundle/msi/*.msi | head -n 1)" \
+             "out/mc-network-${MCN_VERSION}-windows-x86_64.msi"
+          cp src-tauri/target/release/mc-network.exe \
+             "out/mc-network-${MCN_VERSION}-windows-x86_64.exe"
+          ls -l out
+
+      - name: Upload NSIS Installer
+        uses: actions/upload-artifact@v7
+        with:
+          name: mc-network-${{ env.MCN_VERSION }}-windows-x86_64-setup.exe
+          path: out/mc-network-${{ env.MCN_VERSION }}-windows-x86_64-setup.exe
+          retention-days: 90
+          archive: false
+
+      - name: Upload MSI Installer
+        uses: actions/upload-artifact@v7
+        with:
+          name: mc-network-${{ env.MCN_VERSION }}-windows-x86_64.msi
+          path: out/mc-network-${{ env.MCN_VERSION }}-windows-x86_64.msi
+          retention-days: 90
+          archive: false
+
+      - name: Upload Portable Executable
+        uses: actions/upload-artifact@v7
+        with:
+          name: mc-network-${{ env.MCN_VERSION }}-windows-x86_64.exe
+          path: out/mc-network-${{ env.MCN_VERSION }}-windows-x86_64.exe
+          retention-days: 90
+          archive: false
+
+  assemble:
+    runs-on: ubuntu-latest
+    name: Assemble Artifact
+    needs: build-windows
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Compute Version
+        run: |
+          set -euo pipefail
+          INPUT="${{ github.event.inputs.version }}"
+          if [ -n "$INPUT" ]; then
+            VERSION="$INPUT"
+          else
+            VERSION="$(jq -r '.version' src-tauri/tauri.conf.json)"
+            if [ -z "$VERSION" ] || [ "$VERSION" = "null" ]; then
+              VERSION="${GITHUB_SHA::7}"
+            fi
+          fi
+          echo "MCN_VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "resolved version: $VERSION"
+
+      - name: Download Artifacts
+        uses: actions/download-artifact@v8
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Pack All-in-One Archive
+        run: |
+          set -euo pipefail
+          7z -m0=LZMA2 -mx=9 -ms=on a "mc-network-${MCN_VERSION}-all.7z" artifacts/*
+          ls -l
+
+      - name: Upload All-in-One Archive
+        uses: actions/upload-artifact@v7
+        with:
+          name: mc-network-${{ env.MCN_VERSION }}-all.7z
+          path: mc-network-${{ env.MCN_VERSION }}-all.7z
+          retention-days: 90
+          archive: false
+
+      # 仅手动触发且填了 version 才建草稿 Release（draft：人工检查安装包后再 Publish）
+      - name: Create Draft Release
+        if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.version != '' }}
+        run: |
+          set -euo pipefail
+          gh release create "v${MCN_VERSION}" --draft --generate-notes \
+            artifacts/* "mc-network-${MCN_VERSION}-all.7z"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
