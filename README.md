@@ -1,4 +1,4 @@
-# mc-network
+# mc 网络联机
 
 ![封面](docs/封面图.jpeg)
 
