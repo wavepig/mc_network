@@ -1,0 +1,10 @@
+node_modules/
+dist/
+src-tauri/target/
+src-tauri/.easytier/
+src-tauri/gen/schemas/
+reference/
+.vscode/
+reports/
+docs/*
+!docs/封面图.jpeg
